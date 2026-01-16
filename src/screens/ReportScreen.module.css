@@ -1,0 +1,311 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding-bottom: 2rem;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.headerContent {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.headerIcon {
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--color-primary-100) 0%, var(--color-primary-200) 100%);
+  color: var(--color-primary-600);
+  border-radius: var(--radius-xl);
+}
+
+.title {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--color-gray-900);
+  margin-bottom: 0.25rem;
+}
+
+.subtitle {
+  font-size: 1rem;
+  color: var(--color-gray-500);
+}
+
+.headerActions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.reportGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+}
+
+.scoreCardWrapper {
+  grid-column: 1;
+}
+
+.summaryWrapper {
+  grid-column: 2;
+}
+
+.recommendationsWrapper {
+  grid-column: 1 / -1;
+}
+
+.scoreCard {
+  text-align: center;
+}
+
+.scoreDisplay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.scoreCircle {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+}
+
+.scoreValue {
+  font-size: 4rem;
+  font-weight: 700;
+  color: var(--color-gray-900);
+  line-height: 1;
+}
+
+.scoreMax {
+  font-size: 1.5rem;
+  font-weight: 500;
+  color: var(--color-gray-400);
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.sectionTitle {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--color-gray-800);
+}
+
+.sectionIcon {
+  color: var(--color-info);
+}
+
+.sectionIconWarning {
+  color: var(--color-warning);
+}
+
+.sectionIconSuccess {
+  color: var(--color-success);
+}
+
+.sectionIconPrimary {
+  color: var(--color-primary-600);
+}
+
+.summaryText {
+  font-size: 1rem;
+  line-height: 1.7;
+  color: var(--color-gray-600);
+}
+
+.insightsList,
+.painPointsList,
+.opportunitiesList {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.insightItem,
+.painPointItem,
+.opportunityItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  font-size: 0.9375rem;
+  color: var(--color-gray-700);
+  line-height: 1.5;
+}
+
+.insightIcon {
+  flex-shrink: 0;
+  color: var(--color-success);
+  margin-top: 0.125rem;
+}
+
+.painPointBullet {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin-top: 0.5rem;
+  background: var(--color-warning);
+  border-radius: 50%;
+}
+
+.opportunityIcon {
+  flex-shrink: 0;
+  color: var(--color-success);
+  margin-top: 0.25rem;
+}
+
+.recommendationsCard {
+  background: linear-gradient(135deg, var(--color-primary-50) 0%, white 100%);
+}
+
+.recommendationsList {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.recommendationItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 1rem;
+  background: white;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-gray-200);
+}
+
+.recommendationNumber {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: white;
+  background: var(--color-primary-600);
+  border-radius: 50%;
+}
+
+.recommendationText {
+  font-size: 0.9375rem;
+  color: var(--color-gray-700);
+  line-height: 1.5;
+}
+
+.actions {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  padding-top: 1rem;
+}
+
+.noReport {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 4rem 2rem;
+  text-align: center;
+}
+
+.noReportIcon {
+  color: var(--color-gray-300);
+}
+
+.noReport h2 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--color-gray-700);
+}
+
+.noReport p {
+  color: var(--color-gray-500);
+  margin-bottom: 1rem;
+}
+
+/* Print styles */
+@media print {
+  .headerActions,
+  .actions {
+    display: none !important;
+  }
+
+  .container {
+    padding: 0;
+  }
+
+  .reportGrid {
+    display: block;
+  }
+
+  .reportGrid > * {
+    break-inside: avoid;
+    margin-bottom: 1rem;
+  }
+}
+
+/* Responsive */
+@media (max-width: 900px) {
+  .reportGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .scoreCardWrapper,
+  .summaryWrapper,
+  .recommendationsWrapper {
+    grid-column: 1;
+  }
+}
+
+@media (max-width: 640px) {
+  .header {
+    flex-direction: column;
+  }
+
+  .headerContent {
+    flex-direction: column;
+    text-align: center;
+  }
+
+  .headerActions {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .title {
+    font-size: 1.5rem;
+  }
+
+  .scoreValue {
+    font-size: 3rem;
+  }
+
+  .actions {
+    flex-direction: column;
+  }
+
+  .actions button {
+    width: 100%;
+  }
+}
