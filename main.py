@@ -530,7 +530,8 @@ async def generate_report(request: ReportRequest):
     
     # Get analysis if available
     analysis_text = "No structured analysis available"
-    if session["rows"]:
+    if session.get("rows"):
+
         import json
         analysis_text = json.dumps(session["rows"], indent=2)
     
