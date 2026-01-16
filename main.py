@@ -173,7 +173,13 @@ async def call_llm(prompt: str, system_prompt: str = "You are a helpful assistan
                 detail={"message": "LLM API error", "upstream": json_detail(response)},
             )
         
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError:
+            raise HTTPException(
+                status_code=502,
+                detail={"message": "LLM API returned non-JSON body", "body": response.text},
+            )
         return data["choices"][0]["message"]["content"]
 
 # ============================================================================
