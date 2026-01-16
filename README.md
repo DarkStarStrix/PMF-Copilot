@@ -3,5 +3,5 @@
 ## Setup
 
 ```bash
-pnpm install
+cd src && pnpm install
 ```

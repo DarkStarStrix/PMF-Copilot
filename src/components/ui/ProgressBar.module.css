@@ -43,6 +43,10 @@
   background: linear-gradient(90deg, var(--color-warning) 0%, #d97706 100%);
 }
 
+.error {
+  background: linear-gradient(90deg, var(--color-error) 0%, #dc2626 100%);
+}
+
 .label {
   font-size: 0.875rem;
   font-weight: 600;
