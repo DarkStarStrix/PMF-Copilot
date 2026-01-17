@@ -41,19 +41,22 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   // Initialize Deepgram connection and microphone
   useEffect(() => {
     if (!isRecording) {
-      // Stop recording
+      // Stop recording and clean up resources
       if (deepgramSocketRef.current) {
         deepgramSocketRef.current.close();
         deepgramSocketRef.current = null;
       }
       if (processorRef.current) {
         processorRef.current.disconnect();
+        processorRef.current = null;
       }
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
       }
       if (audioContextRef.current && audioContextRef.current.state !== "closed") {
         audioContextRef.current.close();
+        audioContextRef.current = null;
       }
       return;
     }
@@ -68,6 +71,12 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
 
         // Get Deepgram API key from backend
         const keyResponse = await fetch("http://localhost:8000/deepgram-key");
+        if (!keyResponse.ok) {
+          throw new Error(
+            `Failed to fetch Deepgram API key: ${keyResponse.statusText}`
+          );
+        }
+
         const keyData = await keyResponse.json();
 
         if (!keyData.api_key) {
@@ -183,7 +192,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
     if (!isRecording && transcript.trim()) {
       onTranscriptComplete(transcript.trim());
     }
-  }, [isRecording, transcript]);
+  }, [isRecording, transcript, onTranscriptComplete]);
 
   return (
     <div className={styles.container}>
