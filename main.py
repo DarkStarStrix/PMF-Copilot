@@ -25,6 +25,7 @@ load_dotenv()
 YUTORI_API_KEY = os.getenv("YUTORI_API_KEY") or os.getenv("yutori")
 YUTORI_BASE_URL = os.getenv("YUTORI_BASE_URL", "https://api.yutori.com")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 
@@ -48,6 +49,19 @@ def openai_headers() -> dict:
     if not OPENAI_API_KEY:
         return {}
     return {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+
+
+def openai_json_headers() -> dict:
+    headers = {"Content-Type": "application/json"}
+    if OPENAI_API_KEY:
+        headers["Authorization"] = f"Bearer {OPENAI_API_KEY}"
+    return headers
+
+
+def deepgram_headers() -> dict:
+    if not DEEPGRAM_API_KEY:
+        return {}
+    return {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
 
 app = FastAPI(
     title="PMF Researcher API",
@@ -83,6 +97,7 @@ sessions: dict = {}
 # 1. Start Session
 class StartRequest(BaseModel):
     product: str
+    count: int = 3
 
 class StartResponse(BaseModel):
     session_id: str
@@ -91,6 +106,7 @@ class StartResponse(BaseModel):
 # 1b. Generate Questions (no session)
 class QuestionsRequest(BaseModel):
     product: str
+    count: int = 3
 
 class QuestionsResponse(BaseModel):
     questions: list[str]
@@ -143,10 +159,27 @@ class ReportResponse(BaseModel):
 
 # 7. Yutori Research Proxy
 class ResearchTaskRequest(BaseModel):
-    task: str
+    query: Optional[str] = None
+    task: Optional[str] = None
     start_url: Optional[str] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_query(cls, values):
+        if isinstance(values, dict) and not values.get("query") and values.get("task"):
+            values["query"] = values["task"]
+        return values
+
 class ResearchTaskResponse(BaseModel):
+    upstream: dict
+
+# 7b. Product Research
+class ProductResearchRequest(BaseModel):
+    product: str
+    focus: Optional[str] = None
+    start_url: Optional[str] = None
+
+class ProductResearchResponse(BaseModel):
     upstream: dict
 
 # 8. Yutori Scouting Proxy
@@ -219,11 +252,41 @@ async def call_llm_with_timeout(
 ) -> str:
     return await asyncio.wait_for(call_llm(prompt, system_prompt), timeout=timeout_s)
 
+
+async def call_openai_chat(prompt: str, system_prompt: str = "You are a helpful assistant.") -> str:
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured")
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=openai_json_headers(),
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.7,
+            },
+        )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=json_detail(response))
+    data = response.json()
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise HTTPException(status_code=502, detail={"message": "OpenAI invalid response", "upstream": data})
+    message = choices[0].get("message")
+    if not isinstance(message, dict) or "content" not in message:
+        raise HTTPException(status_code=502, detail={"message": "OpenAI invalid response", "upstream": data})
+    return message["content"]
+
 # ============================================================================
 # Prompt Templates
 # ============================================================================
 
-INITIAL_QUESTIONS_PROMPT = """You are a product-market fit researcher. Given the following product description, generate exactly 3 insightful interview questions to understand the user's needs, pain points, and current workflow.
+def questions_prompt(product: str, count: int) -> str:
+    examples = ", ".join([f"\"Question {i+1}?\"" for i in range(count)])
+    return f"""You are a product-market fit researcher. Given the following product description, generate exactly {count} insightful interview questions to understand the user's needs, pain points, and current workflow.
 
 Product: {product}
 
@@ -233,8 +296,8 @@ Requirements:
 - Avoid leading questions
 - Keep questions concise
 
-Return ONLY a JSON array of 3 questions, like:
-["Question 1?", "Question 2?", "Question 3?"]"""
+Return ONLY a JSON array of {count} questions, like:
+[{examples}]"""
 
 FOLLOWUP_PROMPT = """You are a product-market fit researcher conducting a live interview.
 
@@ -351,14 +414,44 @@ async def transcribe_audio(file: UploadFile = File(...)):
     return response.json()
 
 
+@app.post("/transcribe/deepgram")
+async def transcribe_audio_deepgram(file: UploadFile = File(...)):
+    """Transcribe audio with Deepgram (timestamps included)."""
+    if not DEEPGRAM_API_KEY:
+        raise HTTPException(status_code=500, detail="DEEPGRAM_API_KEY is not configured")
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio file")
+    params = {
+        "model": "nova-2",
+        "smart_format": "true",
+        "punctuate": "true",
+        "timestamps": "true",
+        "utterances": "true",
+    }
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
+            "https://api.deepgram.com/v1/listen",
+            headers=deepgram_headers() | {"Content-Type": file.content_type or "application/octet-stream"},
+            params=params,
+            content=audio_bytes,
+        )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=json_detail(response))
+    return response.json()
+
+
 @app.post("/yutori/research/tasks", response_model=ResearchTaskResponse)
 async def create_research_task(request: ResearchTaskRequest):
     """Create a Yutori Research task (proxy)"""
+    payload = request.model_dump(exclude_none=True)
+    if "query" not in payload:
+        raise HTTPException(status_code=422, detail="Missing required field: query")
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
             f"{YUTORI_BASE_URL}/v1/research/tasks",
             headers=yutori_headers(),
-            json=request.model_dump(exclude_none=True),
+            json=payload,
         )
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=json_detail(response))
@@ -376,6 +469,42 @@ async def get_research_task(task_id: str):
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=json_detail(response))
     return ResearchTaskResponse(upstream=response.json())
+
+
+@app.post("/research", response_model=ProductResearchResponse)
+async def research_product(request: ProductResearchRequest):
+    """Create a Yutori research task for a product."""
+    focus = request.focus or "market size, competitors, pricing, and target users"
+    task = (
+        "Research the product described and summarize key findings.\n"
+        f"Product: {request.product}\n"
+        f"Focus: {focus}"
+    )
+    payload = {"query": task}
+    if request.start_url:
+        payload["start_url"] = request.start_url
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            f"{YUTORI_BASE_URL}/v1/research/tasks",
+            headers=yutori_headers(),
+            json=payload,
+        )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=json_detail(response))
+    return ProductResearchResponse(upstream=response.json())
+
+
+@app.get("/research/{task_id}", response_model=ProductResearchResponse)
+async def get_product_research(task_id: str):
+    """Fetch a Yutori research task status/result."""
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.get(
+            f"{YUTORI_BASE_URL}/v1/research/tasks/{task_id}",
+            headers=yutori_headers(),
+        )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=json_detail(response))
+    return ProductResearchResponse(upstream=response.json())
 
 
 @app.post("/yutori/scouting/tasks", response_model=ScoutingTaskResponse)
@@ -439,8 +568,13 @@ async def start_session(request: StartRequest):
     session_id = str(uuid.uuid4())[:8]
 
     # Generate initial questions using LLM
-    prompt = INITIAL_QUESTIONS_PROMPT.format(product=request.product)
-    llm_response = await call_llm(prompt)
+    count = max(1, min(request.count, 10))
+    prompt = questions_prompt(request.product, count)
+    llm_response = None
+    try:
+        llm_response = await call_llm_with_timeout(prompt)
+    except (Exception, asyncio.TimeoutError):
+        llm_response = None
 
     # Parse JSON response
     import json
@@ -458,14 +592,28 @@ async def start_session(request: StartRequest):
     else:
         questions = []
 
+    if not questions and OPENAI_API_KEY:
+        try:
+            openai_response = await call_openai_chat(prompt)
+            clean_response = openai_response.strip()
+            if clean_response.startswith("```"):
+                clean_response = clean_response.split("```")[1]
+                if clean_response.startswith("json"):
+                    clean_response = clean_response[4:]
+            questions = json.loads(clean_response)
+        except Exception:
+            questions = []
+
     if not questions:
         # Fallback questions if parsing fails or LLM unavailable
-        questions = [
+        base = [
             f"How do you currently handle {(request.product.split()[0].lower() if request.product.split() else 'your')} tasks?",
             "What's the biggest challenge you face in this area?",
-            "What tools or solutions have you tried?"
+            "What tools or solutions have you tried?",
+            "What would an ideal solution look like for you?",
+            "How do you measure success in this part of your workflow?",
         ]
-
+        questions = base[:count]
     # Store session
     sessions[session_id] = {
         "session_id": session_id,
@@ -484,7 +632,8 @@ async def start_session(request: StartRequest):
 @app.post("/questions", response_model=QuestionsResponse)
 async def generate_questions(request: QuestionsRequest):
     """Generate interview questions without creating a session."""
-    prompt = INITIAL_QUESTIONS_PROMPT.format(product=request.product)
+    count = max(1, min(request.count, 10))
+    prompt = questions_prompt(request.product, count)
     llm_response = None
     try:
         llm_response = await call_llm_with_timeout(prompt)
@@ -505,12 +654,27 @@ async def generate_questions(request: QuestionsRequest):
     else:
         questions = []
 
+    if not questions and OPENAI_API_KEY:
+        try:
+            openai_response = await call_openai_chat(prompt)
+            clean_response = openai_response.strip()
+            if clean_response.startswith("```"):
+                clean_response = clean_response.split("```")[1]
+                if clean_response.startswith("json"):
+                    clean_response = clean_response[4:]
+            questions = json.loads(clean_response)
+        except Exception:
+            questions = []
+
     if not questions:
-        questions = [
-            f"How do you currently handle {request.product.split()[0].lower()} tasks?",
+        base = [
+            f"How do you currently handle {(request.product.split()[0].lower() if request.product.split() else 'your')} tasks?",
             "What's the biggest challenge you face in this area?",
-            "What tools or solutions have you tried?"
+            "What tools or solutions have you tried?",
+            "What would an ideal solution look like for you?",
+            "How do you measure success in this part of your workflow?",
         ]
+        questions = base[:count]
 
     return QuestionsResponse(questions=questions)
 
@@ -578,6 +742,18 @@ async def add_transcript(request: TranscriptRequest):
     else:
         followups = []
 
+    if not followups and OPENAI_API_KEY:
+        try:
+            openai_response = await call_openai_chat(prompt)
+            clean_response = openai_response.strip()
+            if clean_response.startswith("```"):
+                clean_response = clean_response.split("```")[1]
+                if clean_response.startswith("json"):
+                    clean_response = clean_response[4:]
+            followups = json.loads(clean_response)
+        except Exception:
+            followups = []
+
     if not followups:
         followups = [
             "Can you tell me more about that?",
@@ -644,6 +820,19 @@ async def get_analysis(session_id: str):
     else:
         rows = []
 
+    if not rows and OPENAI_API_KEY:
+        try:
+            openai_response = await call_openai_chat(prompt)
+            clean_response = openai_response.strip()
+            if clean_response.startswith("```"):
+                clean_response = clean_response.split("```")[1]
+                if clean_response.startswith("json"):
+                    clean_response = clean_response[4:]
+            rows_data = json.loads(clean_response)
+            rows = [AnalysisRow(**row) for row in rows_data]
+        except Exception:
+            rows = []
+
     if not rows:
         rows = [
             AnalysisRow(
@@ -706,6 +895,19 @@ async def generate_report(request: ReportRequest):
             report = None
     else:
         report = None
+
+    if report is None and OPENAI_API_KEY:
+        try:
+            openai_response = await call_openai_chat(prompt)
+            clean_response = openai_response.strip()
+            if clean_response.startswith("```"):
+                clean_response = clean_response.split("```")[1]
+                if clean_response.startswith("json"):
+                    clean_response = clean_response[4:]
+            report_data = json.loads(clean_response)
+            report = ReportData(**report_data)
+        except Exception:
+            report = None
 
     if report is None:
         report = ReportData(
