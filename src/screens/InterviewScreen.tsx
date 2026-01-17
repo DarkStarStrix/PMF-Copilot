@@ -1,246 +1,228 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
-import { Square, MessageSquare, CheckCircle } from "lucide-react";
+import { Square } from "lucide-react";
 import { Layout } from "../components/layout";
-import { Button, Card, ProgressBar, Badge } from "../components/ui";
+import { Button } from "../components/ui";
 import { TranscriptView } from "../components/interview/TranscriptView";
+import { QuestionListPanel, type QuestionItem } from "../components/interview/QuestionListPanel";
 import { usePMF } from "../context/PMFContext";
-import { Answer } from "../types";
 import styles from "./InterviewScreen.module.css";
 
-const categoryColors: Record<
-  string,
-  "primary" | "success" | "warning" | "error" | "info"
-> = {
-  "Pain Points": "error",
-  "Feature Requests": "success",
-  "User Behavior": "info",
-  "Competitive Landscape": "warning",
-  "Value Proposition": "primary",
-  "Adoption Barriers": "warning",
-};
+const API_BASE_URL = "http://localhost:8000";
+const POLLING_INTERVAL = 5000; // 5 seconds
 
 export const InterviewScreen: React.FC = () => {
   const navigate = useNavigate();
-  const { state, goToQuestion, addAnswer, completeInterview } = usePMF();
-  const { questions, currentQuestionIndex, answers } = state;
+  const { state, completeInterview } = usePMF();
+  const { productDescription } = state;
 
-  const [currentAnswer, setCurrentAnswer] = useState("");
-  const [showFollowUps, setShowFollowUps] = useState(false);
-  const [followUpAnswers, setFollowUpAnswers] = useState<
-    Record<number, string>
-  >({});
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [questions, setQuestions] = useState<QuestionItem[]>([]);
   const [isRecording, setIsRecording] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const currentQuestion = questions[currentQuestionIndex];
-  const progress = ((currentQuestionIndex + 1) / questions.length) * 100;
-  const existingAnswer = answers.find(
-    (a) => a.questionId === currentQuestion?.id,
-  );
+  const pollingIntervalRef = useRef<number | null>(null);
+  const fullTranscriptRef = useRef<string>("");
 
+  // Initialize session on mount (single persistent session)
   useEffect(() => {
-    if (existingAnswer) {
-      setCurrentAnswer(existingAnswer.answer);
-    } else {
-      setCurrentAnswer("");
-    }
-    setShowFollowUps(false);
-    setFollowUpAnswers({});
-  }, [currentQuestionIndex, existingAnswer]);
+    const initSession = async () => {
+      try {
+        setIsLoading(true);
 
-  const handleSaveAnswer = () => {
-    if (!currentAnswer.trim()) return;
+        // Get or create the persistent session
+        const getSessionResponse = await fetch(`${API_BASE_URL}/get-session`, {
+          method: "GET",
+          headers: { "Content-Type": "application/json" },
+        });
 
-    const answer: Answer = {
-      questionId: currentQuestion.id,
-      questionText: currentQuestion.text,
-      answer: currentAnswer.trim(),
-      category: currentQuestion.category,
-      followUpAnswers: Object.entries(followUpAnswers)
-        .filter(([_, value]) => value.trim())
-        .map(([index, value]) => ({
-          question: currentQuestion.followUps?.[parseInt(index)] || "",
-          answer: value.trim(),
-        })),
+        if (!getSessionResponse.ok) throw new Error("Failed to get session");
+
+        const sessionData = await getSessionResponse.json();
+        const persistentSessionId = sessionData.session_id;
+        setSessionId(persistentSessionId);
+
+        // Update session with product description if available
+        if (productDescription) {
+          await fetch(`${API_BASE_URL}/start`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ product: productDescription }),
+          });
+        }
+
+        // Start live mode
+        await fetch(`${API_BASE_URL}/live/start`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: persistentSessionId }),
+        });
+
+        setIsLoading(false);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to initialize");
+        setIsLoading(false);
+      }
     };
 
-    addAnswer(answer);
-  };
+    // Initialize session immediately on component mount
+    initSession();
 
-  const handlePrevious = () => {
-    handleSaveAnswer();
-    if (currentQuestionIndex > 0) {
-      goToQuestion(currentQuestionIndex - 1);
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+      }
+    };
+  }, []);
+
+  // Poll for questions every 5 seconds
+  useEffect(() => {
+    if (!sessionId) return;
+
+    const pollQuestions = async () => {
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/live/questions?session_id=${sessionId}`
+        );
+
+        if (!response.ok) return;
+
+        const data = await response.json();
+        setQuestions(data.questions || []);
+
+        // Auto-activate first pending question if none active
+        const hasActive = data.questions.some((q: QuestionItem) => q.status === "active");
+        if (!hasActive && data.current_question) {
+          await updateQuestionStatus(data.current_question.id, "active");
+        }
+      } catch (err) {
+        console.error("Failed to poll questions:", err);
+      }
+    };
+
+    // Initial poll
+    pollQuestions();
+
+    // Set up polling interval
+    pollingIntervalRef.current = window.setInterval(pollQuestions, POLLING_INTERVAL);
+
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+      }
+    };
+  }, [sessionId]);
+
+  const updateQuestionStatus = async (
+    questionId: string,
+    status: "done" | "skipped" | "active"
+  ) => {
+    if (!sessionId) return;
+
+    try {
+      await fetch(`${API_BASE_URL}/live/question/status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sessionId,
+          question_id: questionId,
+          status,
+        }),
+      });
+
+      // Update local state immediately for better UX
+      setQuestions((prev) =>
+        prev.map((q) => {
+          if (q.id === questionId) {
+            return { ...q, status };
+          }
+          // Deactivate other questions when activating one
+          if (status === "active" && q.status === "active") {
+            return { ...q, status: "pending" };
+          }
+          return q;
+        })
+      );
+
+      // If marking done, auto-activate next pending question
+      if (status === "done") {
+        const currentQuestion = questions.find((q) => q.id === questionId);
+        const nextPending = questions.find(
+          (q) =>
+            q.status === "pending" &&
+            q.order > (currentQuestion?.order || 0)
+        );
+        if (nextPending) {
+          setTimeout(() => updateQuestionStatus(nextPending.id, "active"), 500);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to update question status:", err);
     }
   };
 
-  const handleEndInterview = () => {
-    handleSaveAnswer();
-    completeInterview();
-    navigate("/results");
+  const handleTranscriptComplete = async (text: string) => {
+    if (!sessionId || !text.trim()) return;
+
+    fullTranscriptRef.current += (fullTranscriptRef.current ? " " : "") + text;
+
+    try {
+      // Send transcript to backend to generate follow-ups
+      await fetch(`${API_BASE_URL}/live/transcript`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sessionId,
+          text: text,
+        }),
+      });
+    } catch (err) {
+      console.error("Failed to send transcript:", err);
+    }
   };
 
-  const handleToggleRecording = async () => {
-    setIsRecording(!isRecording);
+  const handleEndInterview = async () => {
+    if (!sessionId) return;
+
+    try {
+      await fetch(`${API_BASE_URL}/live/stop`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+
+      completeInterview();
+      navigate("/results");
+    } catch (err) {
+      console.error("Failed to stop interview:", err);
+    }
   };
 
-  if (!currentQuestion) {
+  if (isLoading) {
     return (
-      <Layout maxWidth="md">
-        <div className={styles.noQuestions}>
-          <p>No questions available. Please go back to setup.</p>
-          <Button onClick={() => navigate("/questions")}>Go to Setup</Button>
+      <Layout maxWidth="lg">
+        <div className={styles.loading}>Initializing interview...</div>
+      </Layout>
+    );
+  }
+
+  if (error) {
+    return (
+      <Layout maxWidth="lg">
+        <div className={styles.error}>
+          <p>Error: {error}</p>
+          <Button onClick={() => navigate("/")}>Go Back</Button>
         </div>
       </Layout>
     );
   }
 
   return (
-    <Layout maxWidth="lg" centered={false}>
+    <Layout maxWidth="full" centered={false}>
       <div className={styles.container}>
-        <div className={styles.progressSection}>
-          <div className={styles.progressInfo}>
-            <span className={styles.progressLabel}>
-              Question {currentQuestionIndex + 1} of {questions.length}
-            </span>
-            <Badge
-              variant={categoryColors[currentQuestion.category] || "default"}
-            >
-              {currentQuestion.category}
-            </Badge>
-          </div>
-          <ProgressBar progress={progress} size="sm" />
-        </div>
-
-        <div className={styles.mainContent}>
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={currentQuestion.id}
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
-              transition={{ duration: 0.3 }}
-              className={styles.questionSection}
-            >
-              <Card variant="elevated" padding="lg">
-                <h2 className={styles.questionText}>{currentQuestion.text}</h2>
-
-                <div className={styles.answerSection}>
-                  <div className={styles.answerHeader}>
-                    <label className={styles.answerLabel}>
-                      Live Transcript
-                    </label>
-                    <button
-                      className={`${styles.recordButton} ${isRecording ? styles.recording : ""}`}
-                      onClick={handleToggleRecording}
-                      title={
-                        isRecording ? "Stop recording" : "Start voice recording"
-                      }
-                    >
-                      <div className={styles.recordIndicator} />
-                      {isRecording ? "Listening..." : "Start Listening"}
-                    </button>
-                  </div>
-
-                  {/* Replaced TextArea with TranscriptView */}
-                  <div style={{ height: "300px", marginBottom: "20px" }}>
-                    <TranscriptView
-                      isRecording={isRecording}
-                      onTranscriptComplete={(text: string) => {
-                        setCurrentAnswer(text);
-                        setIsRecording(false);
-                        // Simulate generating a follow-up after a delay
-                        setTimeout(() => {
-                          const mockFollowUp =
-                            "How often do you encounter this challenge?";
-                          // Only add if not already there or to show dynamic nature
-                          if (
-                            !currentQuestion.followUps?.includes(mockFollowUp)
-                          ) {
-                            // This is a bit tricky since we can't easily mutate the question object in a deep way without dispatch
-                            // But for UI purpose we can show it locally
-                          }
-                          setShowFollowUps(true);
-                          setFollowUpAnswers((prev) => ({ ...prev, 0: "" })); // Trigger display
-                        }, 1500);
-                      }}
-                    />
-                  </div>
-                </div>
-
-                {/* Modified Follow-ups section to show generated question */}
-                <AnimatePresence>
-                  {showFollowUps && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: "auto", opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      transition={{ duration: 0.3 }}
-                      className={styles.followUpsSection}
-                    >
-                      <div className={styles.followUpItem}>
-                        <div className={styles.followUpLabel}>
-                          <MessageSquare size={16} className="text-blue-500" />
-                          <span style={{ fontWeight: 600, color: "#2563eb" }}>
-                            Suggested Follow-up:
-                          </span>
-                        </div>
-                        <p className={styles.followUpQuestion}>
-                          {currentQuestion.followUps?.[0] ||
-                            "How often do you encounter this challenge?"}
-                        </p>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </Card>
-            </motion.div>
-          </AnimatePresence>
-
-          <div className={styles.sidebar}>
-            <Card variant="outlined" padding="md">
-              <h3 className={styles.sidebarTitle}>Interview Progress</h3>
-              <div className={styles.questionList}>
-                {questions.map((q, index) => {
-                  const isAnswered = answers.some((a) => a.questionId === q.id);
-                  const isCurrent = index === currentQuestionIndex;
-
-                  return (
-                    <button
-                      key={q.id}
-                      className={`${styles.questionListItem} ${isCurrent ? styles.current : ""} ${isAnswered ? styles.answered : ""}`}
-                      onClick={() => {
-                        handleSaveAnswer();
-                        goToQuestion(index);
-                      }}
-                    >
-                      <span className={styles.questionListNumber}>
-                        Q{index + 1}
-                      </span>
-                      <span className={styles.questionListText}>
-                        {q.text.slice(0, 40)}...
-                      </span>
-                      {isAnswered && (
-                        <CheckCircle size={16} className={styles.checkIcon} />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </Card>
-          </div>
-        </div>
-
-        <div className={styles.actions}>
-          <Button
-            variant="secondary"
-            onClick={handlePrevious}
-            disabled={currentQuestionIndex === 0}
-          >
-            Previous
-          </Button>
-
+        <div className={styles.header}>
+          <h1 className={styles.title}>Live Interview</h1>
           <Button
             variant="danger"
             onClick={handleEndInterview}
@@ -248,16 +230,41 @@ export const InterviewScreen: React.FC = () => {
           >
             End Interview
           </Button>
+        </div>
 
-          {/* Next Question button removed as requested */}
-          {currentQuestionIndex === questions.length - 1 && (
-            <Button
-              onClick={handleEndInterview}
-              rightIcon={<CheckCircle size={20} />}
-            >
-              Complete Interview
-            </Button>
-          )}
+        <div className={styles.twoColumnLayout}>
+          {/* Left Column: Questions */}
+          <div className={styles.leftColumn}>
+            <QuestionListPanel
+              questions={questions}
+              onMarkDone={(id) => updateQuestionStatus(id, "done")}
+              onSkip={(id) => updateQuestionStatus(id, "skipped")}
+              onSetActive={(id) => updateQuestionStatus(id, "active")}
+            />
+          </div>
+
+          {/* Right Column: Transcript */}
+          <div className={styles.rightColumn}>
+            <div className={styles.transcriptContainer}>
+              <div className={styles.transcriptHeader}>
+                <h2 className={styles.transcriptTitle}>Real-time Transcription</h2>
+                <button
+                  className={`${styles.recordButton} ${isRecording ? styles.recording : ""}`}
+                  onClick={() => setIsRecording(!isRecording)}
+                >
+                  <div className={styles.recordIndicator} />
+                  {isRecording ? "Listening..." : "Start Listening"}
+                </button>
+              </div>
+
+              <div className={styles.transcriptView}>
+                <TranscriptView
+                  isRecording={isRecording}
+                  onTranscriptComplete={handleTranscriptComplete}
+                />
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </Layout>

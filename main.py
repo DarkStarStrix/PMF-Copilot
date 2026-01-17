@@ -90,6 +90,9 @@ class SessionStatus(str, Enum):
 # In-memory session storage
 sessions: dict = {}
 
+# Single persistent session ID (created on first request)
+current_session_id: Optional[str] = None
+
 # ============================================================================
 # Pydantic Models - Request/Response
 # ============================================================================
@@ -202,6 +205,29 @@ class ScoutingTaskResponse(BaseModel):
 class DeepgramKeyResponse(BaseModel):
     api_key: Optional[str] = None
     message: str = ""
+
+# 10. Question Status Management
+class QuestionStatus(str, Enum):
+    PENDING = "pending"
+    ACTIVE = "active"
+    DONE = "done"
+    SKIPPED = "skipped"
+
+class QuestionWithStatus(BaseModel):
+    id: str
+    text: str
+    status: QuestionStatus
+    created_at: str
+    order: int
+
+class GetQuestionsResponse(BaseModel):
+    questions: list[QuestionWithStatus]
+    current_question: Optional[QuestionWithStatus] = None
+
+class UpdateQuestionStatusRequest(BaseModel):
+    session_id: str
+    question_id: str
+    status: QuestionStatus
 
 # ============================================================================
 # LLM Integration (Yutori API)
@@ -558,66 +584,35 @@ async def get_deepgram_key():
     )
 
 
-# 1️⃣ Start Session (Product Input)
-@app.post("/start", response_model=StartResponse)
-async def start_session(request: StartRequest):
+# Get or Create Single Persistent Session
+@app.get("/get-session", response_model=StartResponse)
+async def get_session():
     """
-    Start a new interview session with product description.
-    Generates initial interview questions.
+    Get or create a single persistent session for the entire app.
+    Ensures only one session exists at a time.
     """
+    global current_session_id
+
+    # If session already exists, return it
+    if current_session_id and current_session_id in sessions:
+        session = sessions[current_session_id]
+        return StartResponse(session_id=current_session_id, questions=session.get("questions", []))
+
+    # Create new session
     session_id = str(uuid.uuid4())[:8]
+    current_session_id = session_id
 
-    # Generate initial questions using LLM
-    count = max(1, min(request.count, 10))
-    prompt = questions_prompt(request.product, count)
-    llm_response = None
-    try:
-        llm_response = await call_llm_with_timeout(prompt)
-    except (Exception, asyncio.TimeoutError):
-        llm_response = None
+    # Initial questions
+    questions = [
+        "How do you currently approach this?",
+        "What's the biggest challenge you face?",
+        "What tools or solutions have you considered?"
+    ]
 
-    # Parse JSON response
-    import json
-    if llm_response:
-        try:
-            # Clean up response if needed
-            clean_response = llm_response.strip()
-            if clean_response.startswith("```"):
-                clean_response = clean_response.split("```")[1]
-                if clean_response.startswith("json"):
-                    clean_response = clean_response[4:]
-            questions = json.loads(clean_response)
-        except json.JSONDecodeError:
-            questions = []
-    else:
-        questions = []
-
-    if not questions and OPENAI_API_KEY:
-        try:
-            openai_response = await call_openai_chat(prompt)
-            clean_response = openai_response.strip()
-            if clean_response.startswith("```"):
-                clean_response = clean_response.split("```")[1]
-                if clean_response.startswith("json"):
-                    clean_response = clean_response[4:]
-            questions = json.loads(clean_response)
-        except Exception:
-            questions = []
-
-    if not questions:
-        # Fallback questions if parsing fails or LLM unavailable
-        base = [
-            f"How do you currently handle {(request.product.split()[0].lower() if request.product.split() else 'your')} tasks?",
-            "What's the biggest challenge you face in this area?",
-            "What tools or solutions have you tried?",
-            "What would an ideal solution look like for you?",
-            "How do you measure success in this part of your workflow?",
-        ]
-        questions = base[:count]
     # Store session
     sessions[session_id] = {
         "session_id": session_id,
-        "product": request.product,
+        "product": "Interview Session",
         "questions": questions,
         "transcript": [],
         "status": SessionStatus.CREATED,
@@ -626,6 +621,79 @@ async def start_session(request: StartRequest):
         "created_at": datetime.utcnow().isoformat()
     }
 
+    print(f"Created persistent session: {session_id}")
+    return StartResponse(session_id=session_id, questions=questions)
+
+
+# 1️⃣ Start Session (Product Input)
+@app.post("/start", response_model=StartResponse)
+async def start_session(request: StartRequest):
+    """
+    Start a new interview session with product description.
+    Generates initial interview questions.
+    Reuses existing session if available (single session mode).
+    """
+    global current_session_id
+
+    # Reuse existing session if available, otherwise create new
+    if current_session_id and current_session_id in sessions:
+        session_id = current_session_id
+        session = sessions[session_id]
+        # Update product description
+        session["product"] = request.product
+        questions = session.get("questions", [])
+    else:
+        session_id = str(uuid.uuid4())[:8]
+        current_session_id = session_id
+        questions = []
+
+        # Generate initial questions using LLM (with fallback)
+        prompt = INITIAL_QUESTIONS_PROMPT.format(product=request.product)
+        llm_response = None
+
+        try:
+            llm_response = await call_llm_with_timeout(prompt, timeout_s=10.0)
+        except Exception as e:
+            print(f"LLM call failed, using fallback questions: {e}")
+            llm_response = None
+
+        # Parse JSON response
+        import json
+        if llm_response:
+            try:
+                # Clean up response if needed
+                clean_response = llm_response.strip()
+                if clean_response.startswith("```"):
+                    clean_response = clean_response.split("```")[1]
+                    if clean_response.startswith("json"):
+                        clean_response = clean_response[4:]
+                questions = json.loads(clean_response)
+            except json.JSONDecodeError as e:
+                print(f"JSON parsing failed: {e}")
+                questions = []
+
+        if not questions:
+            # Fallback questions if parsing fails or LLM unavailable
+            questions = [
+                f"How do you currently handle {(request.product.split()[0].lower() if request.product.split() else 'your')} tasks?",
+                "What's the biggest challenge you face in this area?",
+                "What tools or solutions have you tried?"
+            ]
+
+        # Store session (keep original structure)
+        sessions[session_id] = {
+            "session_id": session_id,
+            "product": request.product,
+            "questions": questions,
+            "transcript": [],
+            "status": SessionStatus.CREATED,
+            "rows": [],
+            "report": None,
+            "created_at": datetime.utcnow().isoformat()
+        }
+
+    print(f"Using session: {session_id}")
+    print(f"Total sessions: {len(sessions)}")
     return StartResponse(session_id=session_id, questions=questions)
 
 
@@ -693,6 +761,23 @@ async def go_live(request: LiveStartRequest):
     session["transcript"] = []
     session["live_started_at"] = datetime.utcnow().isoformat()
 
+    # Initialize generated questions with the initial questions from /start
+    if request.session_id not in generated_questions:
+        generated_questions[request.session_id] = []
+
+    # Convert initial questions to question items with status tracking
+    initial_questions = session.get("questions", [])
+    for idx, question_text in enumerate(initial_questions):
+        generated_questions[request.session_id].append({
+            "id": str(uuid.uuid4()),
+            "text": question_text,
+            "status": "pending",
+            "created_at": datetime.utcnow().isoformat(),
+            "order": idx
+        })
+
+    print(f"Initialized {len(generated_questions[request.session_id])} questions for session {request.session_id}")
+
     return LiveStartResponse(status="live")
 
 
@@ -720,12 +805,19 @@ async def add_transcript(request: TranscriptRequest):
     # Build transcript string
     transcript_text = "\n".join([t["text"] for t in session["transcript"]])
 
-    # Generate follow-ups using LLM
+    # Generate follow-ups using LLM (with fallback)
     prompt = FOLLOWUP_PROMPT.format(
         product=session["product"],
         transcript=transcript_text
     )
-    llm_response = await call_llm(prompt)
+    llm_response = None
+    followups = []
+
+    try:
+        llm_response = await call_llm_with_timeout(prompt, timeout_s=10.0)
+    except Exception as e:
+        print(f"LLM call failed for follow-ups, using defaults: {e}")
+        llm_response = None
 
     # Parse JSON response
     import json
@@ -737,10 +829,9 @@ async def add_transcript(request: TranscriptRequest):
                 if clean_response.startswith("json"):
                     clean_response = clean_response[4:]
             followups = json.loads(clean_response)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing failed for follow-ups: {e}")
             followups = []
-    else:
-        followups = []
 
     if not followups and OPENAI_API_KEY:
         try:
@@ -760,6 +851,22 @@ async def add_transcript(request: TranscriptRequest):
             "How does that affect your day-to-day work?"
         ]
 
+    # Add generated follow-ups to the generated_questions list
+    if request.session_id not in generated_questions:
+        generated_questions[request.session_id] = []
+
+    current_order = len(generated_questions[request.session_id])
+    for idx, followup_text in enumerate(followups):
+        generated_questions[request.session_id].append({
+            "id": str(uuid.uuid4()),
+            "text": followup_text,
+            "status": "pending",
+            "created_at": datetime.utcnow().isoformat(),
+            "order": current_order + idx
+        })
+
+    print(f"Added {len(followups)} follow-up questions to session {request.session_id}")
+
     return TranscriptResponse(followups=followups)
 
 
@@ -777,6 +884,161 @@ async def stop_live(request: LiveStopRequest):
     session["live_ended_at"] = datetime.utcnow().isoformat()
 
     return LiveStopResponse(status="stopped")
+
+
+# ============================================================================
+# In-Memory Storage for Question States (separate from sessions)
+# ============================================================================
+
+# Track question states and generated questions per session
+question_states: dict = {}  # {session_id: {question_id: status}, ...}
+generated_questions: dict = {}  # {session_id: [questions_with_status], ...}
+
+
+# ============================================================================
+# Helper Function for Question Generation
+# ============================================================================
+
+async def generate_and_append_followups(session_id: str):
+    """Generate new follow-up questions based on current transcript"""
+    if session_id not in sessions:
+        return
+
+    session = sessions[session_id]
+    transcript_text = "\n".join([t["text"] for t in session["transcript"]])
+
+    if not transcript_text.strip():
+        return
+
+    # Generate follow-ups using LLM (with fallback)
+    prompt = FOLLOWUP_PROMPT.format(
+        product=session["product"],
+        transcript=transcript_text
+    )
+    llm_response = None
+    followups = []
+
+    try:
+        llm_response = await call_llm_with_timeout(prompt, timeout_s=10.0)
+    except Exception as e:
+        print(f"LLM call failed for follow-ups generation, using defaults: {e}")
+        llm_response = None
+
+    if llm_response:
+        import json
+        try:
+            clean_response = llm_response.strip()
+            if clean_response.startswith("```"):
+                clean_response = clean_response.split("```")[1]
+                if clean_response.startswith("json"):
+                    clean_response = clean_response[4:]
+
+            followups = json.loads(clean_response)
+        except Exception as e:
+            print(f"JSON parsing failed for generated follow-ups: {e}")
+            followups = []
+
+    if not followups:
+        followups = [
+            "Can you tell me more about that?",
+            "How does that affect your day-to-day work?"
+        ]
+
+    # Initialize generated questions list if needed
+    if session_id not in generated_questions:
+        generated_questions[session_id] = []
+
+    # Append new questions
+    current_order = len(generated_questions[session_id])
+    for idx, followup_text in enumerate(followups):
+        generated_questions[session_id].append({
+            "id": str(uuid.uuid4()),
+            "text": followup_text,
+            "status": "pending",
+            "created_at": datetime.utcnow().isoformat(),
+            "order": current_order + idx
+        })
+
+    print(f"Generated {len(followups)} follow-up questions for session {session_id}")
+
+# ============================================================================
+# Live Questions API (Polling)
+# ============================================================================
+
+@app.get("/live/questions", response_model=GetQuestionsResponse)
+async def get_live_questions(session_id: str):
+    """
+    Get current list of generated questions with their statuses.
+    Called repeatedly by frontend for polling every 5 seconds.
+    """
+    print(f"Looking for session: {session_id}")
+    print(f"Available sessions: {list(sessions.keys())}")
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found. Available: {list(sessions.keys())}")
+
+    # Initialize generated questions if not exists
+    if session_id not in generated_questions:
+        generated_questions[session_id] = []
+
+    # Initialize question states if not exists
+    if session_id not in question_states:
+        question_states[session_id] = {}
+
+    questions_list = generated_questions[session_id]
+
+    # Apply tracked states
+    for q in questions_list:
+        q["status"] = question_states[session_id].get(q["id"], "pending")
+
+    # Find current active question or first pending
+    current_question = None
+    for q in questions_list:
+        if q["status"] == "active":
+            current_question = q
+            break
+
+    if not current_question:
+        for q in questions_list:
+            if q["status"] == "pending":
+                current_question = q
+                break
+
+    return GetQuestionsResponse(
+        questions=[QuestionWithStatus(**q) for q in questions_list],
+        current_question=QuestionWithStatus(**current_question) if current_question else None
+    )
+
+
+@app.post("/live/question/status")
+async def update_question_status(request: UpdateQuestionStatusRequest):
+    """
+    Update question status (pending/active/done/skipped).
+    - 'done': Remove question from list (completed)
+    - 'skipped': Remove question from list (not relevant)
+    - 'active': Activate the question
+    """
+    if request.session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if request.session_id not in generated_questions:
+        generated_questions[request.session_id] = []
+
+    questions_list = generated_questions[request.session_id]
+
+    if request.status == "done" or request.status == "skipped":
+        # Remove the question from the list
+        questions_list[:] = [q for q in questions_list if q["id"] != request.question_id]
+        print(f"Removed question {request.question_id} (status: {request.status}). Remaining: {len(questions_list)}")
+    elif request.status == "active":
+        # Mark as active, deactivate others
+        for q in questions_list:
+            if q["id"] == request.question_id:
+                q["status"] = "active"
+            elif q["status"] == "active":
+                q["status"] = "pending"
+        print(f"Activated question {request.question_id}")
+
+    return {"status": "updated"}
 
 
 # 5️⃣ Structured Table (Q / A / Category)

@@ -1,76 +1,82 @@
 .container {
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
   min-height: calc(100vh - 200px);
+  gap: 1.5rem;
+  padding: 1.5rem;
 }
 
-.progressSection {
+.header {
   display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-
-.progressInfo {
-  display: flex;
-  align-items: center;
   justify-content: space-between;
+  align-items: center;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--color-gray-200);
 }
 
-.progressLabel {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--color-gray-600);
+.title {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--color-gray-900);
 }
 
-.mainContent {
+/* Two-column layout */
+.twoColumnLayout {
   display: grid;
-  grid-template-columns: 1fr 280px;
+  grid-template-columns: 1fr 1fr; /* Equal width columns */
   gap: 1.5rem;
   flex: 1;
+  min-height: 0; /* Allow flex children to shrink */
 }
 
-.questionSection {
+.leftColumn,
+.rightColumn {
+  min-height: 0; /* Enable overflow within columns */
   display: flex;
   flex-direction: column;
 }
 
-.questionText {
-  font-size: 1.375rem;
+.transcriptContainer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: white;
+  border: 1px solid var(--color-gray-200);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.transcriptHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.transcriptTitle {
+  font-size: 1.125rem;
   font-weight: 600;
   color: var(--color-gray-900);
-  line-height: 1.4;
-  margin-bottom: 1.5rem;
+  margin: 0;
 }
 
-.answerSection {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.answerHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.answerLabel {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--color-gray-700);
+.transcriptView {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .recordButton {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.375rem 0.75rem;
-  font-size: 0.8125rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
   font-weight: 500;
-  color: var(--color-gray-600);
+  color: var(--color-gray-700);
   background: var(--color-gray-100);
-  border: 1px solid var(--color-gray-200);
+  border: 1px solid var(--color-gray-300);
   border-radius: var(--radius-full);
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -107,186 +113,50 @@
   }
 }
 
-.followUpsSection {
-  margin-top: 1.5rem;
-  padding-top: 1.5rem;
-  border-top: 1px solid var(--color-gray-200);
-}
-
-.followUpsToggle {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.75rem 1rem;
-  width: 100%;
-  font-size: 0.9375rem;
-  font-weight: 500;
-  color: var(--color-gray-700);
-  background: var(--color-gray-50);
-  border: 1px solid var(--color-gray-200);
-  border-radius: var(--radius-lg);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.followUpsToggle:hover {
-  background: var(--color-gray-100);
-}
-
-.toggleIcon {
-  margin-left: auto;
-  transition: transform var(--transition-fast);
-}
-
-.toggleIcon.open {
-  transform: rotate(90deg);
-}
-
-.followUpsList {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  margin-top: 1rem;
-  overflow: hidden;
-}
-
-.followUpItem {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  padding: 1rem;
-  background: var(--color-gray-50);
-  border-radius: var(--radius-lg);
-}
-
-.followUpQuestion {
-  font-size: 0.9375rem;
-  font-weight: 500;
-  color: var(--color-gray-700);
-}
-
-/* Sidebar */
-.sidebar {
-  position: sticky;
-  top: 100px;
-  height: fit-content;
-}
-
-.sidebarTitle {
-  font-size: 0.875rem;
-  font-weight: 600;
-  color: var(--color-gray-700);
-  margin-bottom: 1rem;
-}
-
-.questionList {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.questionListItem {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.625rem 0.75rem;
-  font-size: 0.8125rem;
-  text-align: left;
-  color: var(--color-gray-600);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.questionListItem:hover {
-  background: var(--color-gray-50);
-}
-
-.questionListItem.current {
-  background: var(--color-primary-50);
-  border-color: var(--color-primary-200);
-  color: var(--color-primary-700);
-}
-
-.questionListItem.answered {
-  color: var(--color-gray-700);
-}
-
-.questionListNumber {
-  font-weight: 600;
-  min-width: 28px;
-}
-
-.questionListText {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.checkIcon {
-  flex-shrink: 0;
-  color: var(--color-success);
-}
-
-.actions {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding-top: 1rem;
-  border-top: 1px solid var(--color-gray-200);
-}
-
-.noQuestions {
+.loading,
+.error {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  min-height: 400px;
   gap: 1rem;
-  padding: 3rem;
-  text-align: center;
-  color: var(--color-gray-500);
+  color: var(--color-gray-600);
+  font-size: 1rem;
 }
 
-/* Responsive */
+/* Responsive: Stack columns on smaller screens */
 @media (max-width: 900px) {
-  .mainContent {
+  .twoColumnLayout {
     grid-template-columns: 1fr;
+    gap: 1rem;
   }
 
-  .sidebar {
-    position: static;
-    order: -1;
+  .leftColumn {
+    order: 2; /* Move questions below transcript on mobile */
   }
 
-  .questionList {
-    flex-direction: row;
-    flex-wrap: wrap;
-  }
-
-  .questionListItem {
-    flex: 0 0 auto;
-  }
-
-  .questionListText {
-    display: none;
+  .rightColumn {
+    order: 1;
   }
 }
 
 @media (max-width: 640px) {
-  .questionText {
-    font-size: 1.125rem;
+  .container {
+    padding: 1rem;
   }
 
-  .actions {
-    flex-wrap: wrap;
-    gap: 0.75rem;
+  .title {
+    font-size: 1.375rem;
   }
 
-  .actions button {
-    flex: 1;
-    min-width: 120px;
+  .header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+
+  .transcriptContainer {
+    padding: 1rem;
   }
 }

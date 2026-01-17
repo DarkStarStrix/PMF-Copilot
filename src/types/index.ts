@@ -5,6 +5,14 @@ export interface Question {
   followUps?: string[];
 }
 
+export interface QuestionItem {
+  id: string;
+  text: string;
+  status: 'pending' | 'active' | 'done' | 'skipped';
+  created_at: string;
+  order: number;
+}
+
 export type QuestionCategory =
   | 'Pain Points'
   | 'Feature Requests'
