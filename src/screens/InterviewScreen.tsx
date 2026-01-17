@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Square } from "lucide-react";
 import { Layout } from "../components/layout";
 import { Button } from "../components/ui";
-import { TranscriptView } from "../components/interview/TranscriptView";
+import { TranscriptView, type TranscriptViewRef } from "../components/interview/TranscriptView";
 import { QuestionListPanel, type QuestionItem } from "../components/interview/QuestionListPanel";
 import { usePMF } from "../context/PMFContext";
 import styles from "./InterviewScreen.module.css";
@@ -24,6 +24,7 @@ export const InterviewScreen: React.FC = () => {
 
   const pollingIntervalRef = useRef<number | null>(null);
   const fullTranscriptRef = useRef<string>("");
+  const transcriptViewRef = useRef<TranscriptViewRef>(null);
 
   // Initialize session on mount (single persistent session)
   useEffect(() => {
@@ -145,9 +146,15 @@ export const InterviewScreen: React.FC = () => {
         })
       );
 
-      // If marking done, auto-activate next pending question
+      // If marking done, add question marker and auto-activate next pending question
       if (status === "done") {
         const currentQuestion = questions.find((q) => q.id === questionId);
+        if (currentQuestion && transcriptViewRef.current) {
+          transcriptViewRef.current.addQuestionMarker(
+            currentQuestion.order,
+            currentQuestion.text
+          );
+        }
         const nextPending = questions.find(
           (q) =>
             q.status === "pending" &&
@@ -259,6 +266,7 @@ export const InterviewScreen: React.FC = () => {
 
               <div className={styles.transcriptView}>
                 <TranscriptView
+                  ref={transcriptViewRef}
                   isRecording={isRecording}
                   onTranscriptComplete={handleTranscriptComplete}
                 />

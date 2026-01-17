@@ -1,9 +1,19 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, forwardRef, useImperativeHandle } from "react";
 import styles from "./TranscriptView.module.css";
+
+interface Chunk {
+  text: string;
+  timestamp: string;
+  type?: "transcript" | "question";
+}
 
 interface TranscriptViewProps {
   isRecording: boolean;
   onTranscriptComplete: (text: string) => void;
+}
+
+export interface TranscriptViewRef {
+  addQuestionMarker: (questionNumber: number, questionText: string) => void;
 }
 
 /**
@@ -13,11 +23,9 @@ interface TranscriptViewProps {
  * 1. Set DEEPGRAM_API_KEY environment variable in your backend .env file
  * 2. Backend endpoint /deepgram-key returns { api_key: string }
  */
-export const TranscriptView: React.FC<TranscriptViewProps> = ({
-  isRecording,
-  onTranscriptComplete,
-}) => {
-  const [transcript, setTranscript] = useState("");
+export const TranscriptView = forwardRef<TranscriptViewRef, TranscriptViewProps>(
+  ({ isRecording, onTranscriptComplete }, ref) => {
+  const [chunks, setChunks] = useState<Chunk[]>([]);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -26,6 +34,25 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   const audioContextRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<any>(null);
   const isMountedRef = useRef(true);
+  const currentChunkRef = useRef("");
+  const chunkTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const recordingStartTimeRef = useRef<number | null>(null);
+
+  // Expose method to add question markers
+  useImperativeHandle(ref, () => ({
+    addQuestionMarker: (questionNumber: number, questionText: string) => {
+      const timestamp = getElapsedTime();
+      setChunks((prev) => [
+        ...prev,
+        {
+          text: `Q${questionNumber}: ${questionText}`,
+          timestamp,
+          type: "question",
+        },
+      ]);
+    },
+  }));
 
   // Convert float32 audio to PCM16
   const floatTo16BitPCM = (float32Array: Float32Array): ArrayBuffer => {
@@ -38,10 +65,29 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
     return buffer;
   };
 
+  // Format elapsed time as MM:SS
+  const formatTime = (ms: number): string => {
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  };
+
+  // Get current elapsed time since recording started
+  const getElapsedTime = (): string => {
+    if (!recordingStartTimeRef.current) return "00:00";
+    const elapsed = Date.now() - recordingStartTimeRef.current;
+    return formatTime(elapsed);
+  };
+
   // Initialize Deepgram connection and microphone
   useEffect(() => {
     if (!isRecording) {
       // Stop recording and clean up resources
+      if (chunkTimerRef.current) {
+        clearInterval(chunkTimerRef.current);
+        chunkTimerRef.current = null;
+      }
       if (deepgramSocketRef.current) {
         deepgramSocketRef.current.close();
         deepgramSocketRef.current = null;
@@ -58,6 +104,12 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
         audioContextRef.current.close();
         audioContextRef.current = null;
       }
+      // Save any remaining chunk content
+      if (currentChunkRef.current.trim()) {
+        setChunks((prev) => [...prev, { text: currentChunkRef.current.trim(), timestamp: getElapsedTime() }]);
+      }
+      currentChunkRef.current = "";
+      recordingStartTimeRef.current = null;
       return;
     }
 
@@ -67,7 +119,9 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
       try {
         setIsConnecting(true);
         setError(null);
-        setTranscript("");
+        setChunks([]);
+        currentChunkRef.current = "";
+        recordingStartTimeRef.current = Date.now();
 
         // Get Deepgram API key from backend
         const keyResponse = await fetch("http://localhost:8000/deepgram-key");
@@ -123,6 +177,16 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
         deepgramSocket.onopen = () => {
           if (isMountedRef.current) {
             setIsConnecting(false);
+            // Start 5-second chunk timer
+            if (chunkTimerRef.current) {
+              clearInterval(chunkTimerRef.current);
+            }
+            chunkTimerRef.current = setInterval(() => {
+              if (currentChunkRef.current.trim()) {
+                setChunks((prev) => [...prev, { text: currentChunkRef.current.trim(), timestamp: getElapsedTime() }]);
+                currentChunkRef.current = "";
+              }
+            }, 5000);
           }
         };
 
@@ -138,7 +202,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
             ) {
               const newTranscript = data.channel.alternatives[0].transcript;
               if (newTranscript && data.is_final) {
-                setTranscript((prev) => (prev + " " + newTranscript).trim());
+                currentChunkRef.current = (currentChunkRef.current + " " + newTranscript).trim();
               }
             }
           } catch (e) {
@@ -189,17 +253,39 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
 
   // Handle transcript completion
   useEffect(() => {
-    if (!isRecording && transcript.trim()) {
-      onTranscriptComplete(transcript.trim());
+    if (!isRecording && chunks.length > 0) {
+      const fullTranscript = chunks.map((chunk) => chunk.text).join(" ");
+      onTranscriptComplete(fullTranscript);
     }
-  }, [isRecording, transcript, onTranscriptComplete]);
+  }, [isRecording, chunks, onTranscriptComplete]);
+
+  // Auto-scroll to bottom when chunks update
+  useEffect(() => {
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+    }
+  }, [chunks]);
 
   return (
     <div className={styles.container}>
       {error && <div className={styles.error}>{error}</div>}
       {isConnecting && <div className={styles.connecting}>Connecting to Deepgram...</div>}
-      <div className={styles.transcriptBox}>
-        {transcript || (
+      <div className={styles.transcriptBox} ref={scrollContainerRef}>
+        {chunks.length > 0 ? (
+          <div className={styles.chunksContainer}>
+            {chunks.map((chunk, index) => (
+              <div
+                key={index}
+                className={`${styles.chunk} ${
+                  chunk.type === "question" ? styles.questionMarker : ""
+                }`}
+              >
+                <div className={styles.chunkTimestamp}>{chunk.timestamp}</div>
+                <div className={styles.chunkText}>{chunk.text}</div>
+              </div>
+            ))}
+          </div>
+        ) : (
           <span className={styles.placeholder}>
             {isRecording ? "Listening..." : "Click 'Start Listening' to begin"}
           </span>
@@ -207,4 +293,5 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
       </div>
     </div>
   );
-};
+  }
+);
