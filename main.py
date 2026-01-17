@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, model_validator
+from elevenlabs.client import ElevenLabs
 
 load_dotenv()
 
@@ -24,6 +25,8 @@ load_dotenv()
 YUTORI_API_KEY = os.getenv("YUTORI_API_KEY") or os.getenv("yutori")
 YUTORI_BASE_URL = os.getenv("YUTORI_BASE_URL", "https://api.yutori.com")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 
 
 def yutori_headers() -> dict:
@@ -162,6 +165,11 @@ class ScoutingTaskRequest(BaseModel):
 class ScoutingTaskResponse(BaseModel):
     upstream: dict
 
+# 9. Deepgram API Key
+class DeepgramKeyResponse(BaseModel):
+    api_key: Optional[str] = None
+    message: str = ""
+
 # ============================================================================
 # LLM Integration (Yutori API)
 # ============================================================================
@@ -181,13 +189,13 @@ async def call_llm(prompt: str, system_prompt: str = "You are a helpful assistan
                 "temperature": 0.7
             }
         )
-        
+
         if response.status_code != 200:
             raise HTTPException(
                 status_code=500,
                 detail={"message": "LLM API error", "upstream": json_detail(response)},
             )
-        
+
         try:
             data = response.json()
         except ValueError:
@@ -400,6 +408,28 @@ async def get_scouting_task(task_id: str):
     return ScoutingTaskResponse(upstream=response.json())
 
 
+# ============================================================================
+# Deepgram Integration
+# ============================================================================
+
+@app.get("/deepgram-key", response_model=DeepgramKeyResponse)
+async def get_deepgram_key():
+    """
+    Returns Deepgram API key for frontend WebSocket connection.
+    In production, use a more secure method (e.g., generate temporary tokens).
+    """
+    if not DEEPGRAM_API_KEY:
+        return DeepgramKeyResponse(
+            api_key=None,
+            message="DEEPGRAM_API_KEY not set. Get a free API key at https://deepgram.com (60 hours/month free)"
+        )
+    print(f"Deepgram API key: {DEEPGRAM_API_KEY}")
+    return DeepgramKeyResponse(
+        api_key=DEEPGRAM_API_KEY,
+        message="Deepgram API key available"
+    )
+
+
 # 1️⃣ Start Session (Product Input)
 @app.post("/start", response_model=StartResponse)
 async def start_session(request: StartRequest):
@@ -408,14 +438,18 @@ async def start_session(request: StartRequest):
     Generates initial interview questions.
     """
     session_id = str(uuid.uuid4())[:8]
-    
+
     # Generate initial questions using LLM
     prompt = INITIAL_QUESTIONS_PROMPT.format(product=request.product)
+<<<<<<< HEAD
     llm_response = None
     try:
         llm_response = await call_llm_with_timeout(prompt)
     except (Exception, asyncio.TimeoutError):
         llm_response = None
+=======
+    llm_response = await call_llm(prompt)
+>>>>>>> 2714ee2 (Implement Deepgram real-time transcription for interview recording)
 
     # Parse JSON response
     import json
@@ -440,7 +474,7 @@ async def start_session(request: StartRequest):
             "What's the biggest challenge you face in this area?",
             "What tools or solutions have you tried?"
         ]
-    
+
     # Store session
     sessions[session_id] = {
         "session_id": session_id,
@@ -452,7 +486,7 @@ async def start_session(request: StartRequest):
         "report": None,
         "created_at": datetime.utcnow().isoformat()
     }
-    
+
     return StartResponse(session_id=session_id, questions=questions)
 
 
@@ -498,12 +532,12 @@ async def go_live(request: LiveStartRequest):
     """
     if request.session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     session = sessions[request.session_id]
     session["status"] = SessionStatus.LIVE
     session["transcript"] = []
     session["live_started_at"] = datetime.utcnow().isoformat()
-    
+
     return LiveStartResponse(status="live")
 
 
@@ -516,31 +550,35 @@ async def add_transcript(request: TranscriptRequest):
     """
     if request.session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     session = sessions[request.session_id]
-    
+
     if session["status"] != SessionStatus.LIVE:
         raise HTTPException(status_code=400, detail="Session is not live")
-    
+
     # Append to transcript
     session["transcript"].append({
         "text": request.text,
         "timestamp": datetime.utcnow().isoformat()
     })
-    
+
     # Build transcript string
     transcript_text = "\n".join([t["text"] for t in session["transcript"]])
-    
+
     # Generate follow-ups using LLM
     prompt = FOLLOWUP_PROMPT.format(
         product=session["product"],
         transcript=transcript_text
     )
+<<<<<<< HEAD
     llm_response = None
     try:
         llm_response = await call_llm_with_timeout(prompt)
     except (Exception, asyncio.TimeoutError):
         llm_response = None
+=======
+    llm_response = await call_llm(prompt)
+>>>>>>> 2714ee2 (Implement Deepgram real-time transcription for interview recording)
 
     # Parse JSON response
     import json
@@ -562,7 +600,7 @@ async def add_transcript(request: TranscriptRequest):
             "Can you tell me more about that?",
             "How does that affect your day-to-day work?"
         ]
-    
+
     return TranscriptResponse(followups=followups)
 
 
@@ -574,11 +612,11 @@ async def stop_live(request: LiveStopRequest):
     """
     if request.session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     session = sessions[request.session_id]
     session["status"] = SessionStatus.POST_INTERVIEW
     session["live_ended_at"] = datetime.utcnow().isoformat()
-    
+
     return LiveStopResponse(status="stopped")
 
 
@@ -591,26 +629,31 @@ async def get_analysis(session_id: str):
     """
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     session = sessions[session_id]
-    
+
     if not session["transcript"]:
         raise HTTPException(status_code=400, detail="No transcript available")
-    
+
     # Build transcript string
     transcript_text = "\n".join([t["text"] for t in session["transcript"]])
-    
+
     # Generate analysis using LLM
     prompt = ANALYSIS_PROMPT.format(
         product=session["product"],
         transcript=transcript_text
     )
+<<<<<<< HEAD
     llm_response = None
     try:
         llm_response = await call_llm_with_timeout(prompt)
     except (Exception, asyncio.TimeoutError):
         llm_response = None
     
+=======
+    llm_response = await call_llm(prompt)
+
+>>>>>>> 2714ee2 (Implement Deepgram real-time transcription for interview recording)
     # Parse JSON response
     import json
     if llm_response:
@@ -635,10 +678,10 @@ async def get_analysis(session_id: str):
                 category="Other"
             )
         ]
-    
+
     # Cache the rows
     session["rows"] = [r.model_dump() for r in rows]
-    
+
     return AnalysisResponse(rows=rows)
 
 
@@ -650,34 +693,39 @@ async def generate_report(request: ReportRequest):
     """
     if request.session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     session = sessions[request.session_id]
-    
+
     if not session["transcript"]:
         raise HTTPException(status_code=400, detail="No transcript available")
-    
+
     # Build transcript string
     transcript_text = "\n".join([t["text"] for t in session["transcript"]])
-    
+
     # Get analysis if available
     analysis_text = "No structured analysis available"
     if session.get("rows"):
 
         import json
         analysis_text = json.dumps(session["rows"], indent=2)
-    
+
     # Generate report using LLM
     prompt = REPORT_PROMPT.format(
         product=session["product"],
         transcript=transcript_text,
         analysis=analysis_text
     )
+<<<<<<< HEAD
     llm_response = None
     try:
         llm_response = await call_llm_with_timeout(prompt)
     except (Exception, asyncio.TimeoutError):
         llm_response = None
     
+=======
+    llm_response = await call_llm(prompt)
+
+>>>>>>> 2714ee2 (Implement Deepgram real-time transcription for interview recording)
     # Parse JSON response
     import json
     if llm_response:
@@ -700,10 +748,10 @@ async def generate_report(request: ReportRequest):
             key_pains=["See transcript for details"],
             opportunities=["Further analysis recommended"]
         )
-    
+
     # Cache the report
     session["report"] = report.model_dump()
-    
+
     return ReportResponse(report=report)
 
 
