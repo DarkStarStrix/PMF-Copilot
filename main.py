@@ -5,14 +5,16 @@ One flow, one service, no complexity.
 
 import os
 import uuid
+import asyncio
 import httpx
 from enum import Enum
 from typing import Optional
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, model_validator
+from elevenlabs.client import ElevenLabs
 
 load_dotenv()
 
@@ -22,6 +24,9 @@ load_dotenv()
 
 YUTORI_API_KEY = os.getenv("YUTORI_API_KEY") or os.getenv("yutori")
 YUTORI_BASE_URL = os.getenv("YUTORI_BASE_URL", "https://api.yutori.com")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 
 
 def yutori_headers() -> dict:
@@ -37,6 +42,12 @@ def json_detail(response: httpx.Response) -> dict:
         return response.json()
     except ValueError:
         return {"detail": response.text}
+
+
+def openai_headers() -> dict:
+    if not OPENAI_API_KEY:
+        return {}
+    return {"Authorization": f"Bearer {OPENAI_API_KEY}"}
 
 app = FastAPI(
     title="PMF Researcher API",
@@ -75,6 +86,13 @@ class StartRequest(BaseModel):
 
 class StartResponse(BaseModel):
     session_id: str
+    questions: list[str]
+
+# 1b. Generate Questions (no session)
+class QuestionsRequest(BaseModel):
+    product: str
+
+class QuestionsResponse(BaseModel):
     questions: list[str]
 
 # 2. Go Live
@@ -147,6 +165,11 @@ class ScoutingTaskRequest(BaseModel):
 class ScoutingTaskResponse(BaseModel):
     upstream: dict
 
+# 9. Deepgram API Key
+class DeepgramKeyResponse(BaseModel):
+    api_key: Optional[str] = None
+    message: str = ""
+
 # ============================================================================
 # LLM Integration (Yutori API)
 # ============================================================================
@@ -166,13 +189,13 @@ async def call_llm(prompt: str, system_prompt: str = "You are a helpful assistan
                 "temperature": 0.7
             }
         )
-        
+
         if response.status_code != 200:
             raise HTTPException(
                 status_code=500,
                 detail={"message": "LLM API error", "upstream": json_detail(response)},
             )
-        
+
         try:
             data = response.json()
         except ValueError:
@@ -187,6 +210,14 @@ async def call_llm(prompt: str, system_prompt: str = "You are a helpful assistan
         if not isinstance(message, dict) or "content" not in message:
             raise HTTPException(status_code=502, detail={"message": "LLM API invalid response", "upstream": data})
         return message["content"]
+
+
+async def call_llm_with_timeout(
+    prompt: str,
+    system_prompt: str = "You are a helpful assistant.",
+    timeout_s: float = 12.0,
+) -> str:
+    return await asyncio.wait_for(call_llm(prompt, system_prompt), timeout=timeout_s)
 
 # ============================================================================
 # Prompt Templates
@@ -288,6 +319,38 @@ async def yutori_health():
     return {"status_code": response.status_code, "body": json_detail(response)}
 
 
+@app.post("/transcribe")
+async def transcribe_audio(file: UploadFile = File(...)):
+    """Transcribe audio with timestamps via OpenAI"""
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured")
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio file")
+    data = {
+        "model": "whisper-1",
+        "response_format": "verbose_json",
+        "timestamp_granularities[]": "segment",
+    }
+    files = {
+        "file": (
+            file.filename or "audio.wav",
+            audio_bytes,
+            file.content_type or "application/octet-stream",
+        )
+    }
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers=openai_headers(),
+            data=data,
+            files=files,
+        )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=json_detail(response))
+    return response.json()
+
+
 @app.post("/yutori/research/tasks", response_model=ResearchTaskResponse)
 async def create_research_task(request: ResearchTaskRequest):
     """Create a Yutori Research task (proxy)"""
@@ -345,6 +408,28 @@ async def get_scouting_task(task_id: str):
     return ScoutingTaskResponse(upstream=response.json())
 
 
+# ============================================================================
+# Deepgram Integration
+# ============================================================================
+
+@app.get("/deepgram-key", response_model=DeepgramKeyResponse)
+async def get_deepgram_key():
+    """
+    Returns Deepgram API key for frontend WebSocket connection.
+    In production, use a more secure method (e.g., generate temporary tokens).
+    """
+    if not DEEPGRAM_API_KEY:
+        return DeepgramKeyResponse(
+            api_key=None,
+            message="DEEPGRAM_API_KEY not set. Get a free API key at https://deepgram.com (60 hours/month free)"
+        )
+    print(f"Deepgram API key: {DEEPGRAM_API_KEY}")
+    return DeepgramKeyResponse(
+        api_key=DEEPGRAM_API_KEY,
+        message="Deepgram API key available"
+    )
+
+
 # 1️⃣ Start Session (Product Input)
 @app.post("/start", response_model=StartResponse)
 async def start_session(request: StartRequest):
@@ -353,29 +438,35 @@ async def start_session(request: StartRequest):
     Generates initial interview questions.
     """
     session_id = str(uuid.uuid4())[:8]
-    
+
     # Generate initial questions using LLM
     prompt = INITIAL_QUESTIONS_PROMPT.format(product=request.product)
     llm_response = await call_llm(prompt)
-    
+
     # Parse JSON response
     import json
-    try:
-        # Clean up response if needed
-        clean_response = llm_response.strip()
-        if clean_response.startswith("```"):
-            clean_response = clean_response.split("```")[1]
-            if clean_response.startswith("json"):
-                clean_response = clean_response[4:]
-        questions = json.loads(clean_response)
-    except json.JSONDecodeError:
-        # Fallback questions if parsing fails
+    if llm_response:
+        try:
+            # Clean up response if needed
+            clean_response = llm_response.strip()
+            if clean_response.startswith("```"):
+                clean_response = clean_response.split("```")[1]
+                if clean_response.startswith("json"):
+                    clean_response = clean_response[4:]
+            questions = json.loads(clean_response)
+        except json.JSONDecodeError:
+            questions = []
+    else:
+        questions = []
+
+    if not questions:
+        # Fallback questions if parsing fails or LLM unavailable
         questions = [
             f"How do you currently handle {(request.product.split()[0].lower() if request.product.split() else 'your')} tasks?",
             "What's the biggest challenge you face in this area?",
             "What tools or solutions have you tried?"
         ]
-    
+
     # Store session
     sessions[session_id] = {
         "session_id": session_id,
@@ -387,8 +478,42 @@ async def start_session(request: StartRequest):
         "report": None,
         "created_at": datetime.utcnow().isoformat()
     }
-    
+
     return StartResponse(session_id=session_id, questions=questions)
+
+
+@app.post("/questions", response_model=QuestionsResponse)
+async def generate_questions(request: QuestionsRequest):
+    """Generate interview questions without creating a session."""
+    prompt = INITIAL_QUESTIONS_PROMPT.format(product=request.product)
+    llm_response = None
+    try:
+        llm_response = await call_llm_with_timeout(prompt)
+    except (Exception, asyncio.TimeoutError):
+        llm_response = None
+
+    import json
+    if llm_response:
+        try:
+            clean_response = llm_response.strip()
+            if clean_response.startswith("```"):
+                clean_response = clean_response.split("```")[1]
+                if clean_response.startswith("json"):
+                    clean_response = clean_response[4:]
+            questions = json.loads(clean_response)
+        except json.JSONDecodeError:
+            questions = []
+    else:
+        questions = []
+
+    if not questions:
+        questions = [
+            f"How do you currently handle {request.product.split()[0].lower()} tasks?",
+            "What's the biggest challenge you face in this area?",
+            "What tools or solutions have you tried?"
+        ]
+
+    return QuestionsResponse(questions=questions)
 
 
 # 2️⃣ Go Live (Start Interview)
@@ -399,12 +524,12 @@ async def go_live(request: LiveStartRequest):
     """
     if request.session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     session = sessions[request.session_id]
     session["status"] = SessionStatus.LIVE
     session["transcript"] = []
     session["live_started_at"] = datetime.utcnow().isoformat()
-    
+
     return LiveStartResponse(status="live")
 
 
@@ -417,43 +542,49 @@ async def add_transcript(request: TranscriptRequest):
     """
     if request.session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     session = sessions[request.session_id]
-    
+
     if session["status"] != SessionStatus.LIVE:
         raise HTTPException(status_code=400, detail="Session is not live")
-    
+
     # Append to transcript
     session["transcript"].append({
         "text": request.text,
         "timestamp": datetime.utcnow().isoformat()
     })
-    
+
     # Build transcript string
     transcript_text = "\n".join([t["text"] for t in session["transcript"]])
-    
+
     # Generate follow-ups using LLM
     prompt = FOLLOWUP_PROMPT.format(
         product=session["product"],
         transcript=transcript_text
     )
     llm_response = await call_llm(prompt)
-    
+
     # Parse JSON response
     import json
-    try:
-        clean_response = llm_response.strip()
-        if clean_response.startswith("```"):
-            clean_response = clean_response.split("```")[1]
-            if clean_response.startswith("json"):
-                clean_response = clean_response[4:]
-        followups = json.loads(clean_response)
-    except json.JSONDecodeError:
+    if llm_response:
+        try:
+            clean_response = llm_response.strip()
+            if clean_response.startswith("```"):
+                clean_response = clean_response.split("```")[1]
+                if clean_response.startswith("json"):
+                    clean_response = clean_response[4:]
+            followups = json.loads(clean_response)
+        except json.JSONDecodeError:
+            followups = []
+    else:
+        followups = []
+
+    if not followups:
         followups = [
             "Can you tell me more about that?",
             "How does that affect your day-to-day work?"
         ]
-    
+
     return TranscriptResponse(followups=followups)
 
 
@@ -465,11 +596,11 @@ async def stop_live(request: LiveStopRequest):
     """
     if request.session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     session = sessions[request.session_id]
     session["status"] = SessionStatus.POST_INTERVIEW
     session["live_ended_at"] = datetime.utcnow().isoformat()
-    
+
     return LiveStopResponse(status="stopped")
 
 
@@ -482,35 +613,39 @@ async def get_analysis(session_id: str):
     """
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     session = sessions[session_id]
-    
+
     if not session["transcript"]:
         raise HTTPException(status_code=400, detail="No transcript available")
-    
+
     # Build transcript string
     transcript_text = "\n".join([t["text"] for t in session["transcript"]])
-    
+
     # Generate analysis using LLM
     prompt = ANALYSIS_PROMPT.format(
         product=session["product"],
         transcript=transcript_text
     )
     llm_response = await call_llm(prompt)
-    
+
     # Parse JSON response
     import json
-    try:
-        clean_response = llm_response.strip()
-        if clean_response.startswith("```"):
-            clean_response = clean_response.split("```")[1]
-            if clean_response.startswith("json"):
-                clean_response = clean_response[4:]
-        rows_data = json.loads(clean_response)
-        rows = [AnalysisRow(**row) for row in rows_data]
-    except HTTPException:
-        raise
-    except (json.JSONDecodeError, Exception):
+    if llm_response:
+        try:
+            clean_response = llm_response.strip()
+            if clean_response.startswith("```"):
+                clean_response = clean_response.split("```")[1]
+                if clean_response.startswith("json"):
+                    clean_response = clean_response[4:]
+            rows_data = json.loads(clean_response)
+            rows = [AnalysisRow(**row) for row in rows_data]
+        except (json.JSONDecodeError, Exception):
+            rows = []
+    else:
+        rows = []
+
+    if not rows:
         rows = [
             AnalysisRow(
                 question="Interview conducted",
@@ -518,10 +653,10 @@ async def get_analysis(session_id: str):
                 category="Other"
             )
         ]
-    
+
     # Cache the rows
     session["rows"] = [r.model_dump() for r in rows]
-    
+
     return AnalysisResponse(rows=rows)
 
 
@@ -533,22 +668,22 @@ async def generate_report(request: ReportRequest):
     """
     if request.session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     session = sessions[request.session_id]
-    
+
     if not session["transcript"]:
         raise HTTPException(status_code=400, detail="No transcript available")
-    
+
     # Build transcript string
     transcript_text = "\n".join([t["text"] for t in session["transcript"]])
-    
+
     # Get analysis if available
     analysis_text = "No structured analysis available"
     if session.get("rows"):
 
         import json
         analysis_text = json.dumps(session["rows"], indent=2)
-    
+
     # Generate report using LLM
     prompt = REPORT_PROMPT.format(
         product=session["product"],
@@ -556,27 +691,33 @@ async def generate_report(request: ReportRequest):
         analysis=analysis_text
     )
     llm_response = await call_llm(prompt)
-    
+
     # Parse JSON response
     import json
-    try:
-        clean_response = llm_response.strip()
-        if clean_response.startswith("```"):
-            clean_response = clean_response.split("```")[1]
-            if clean_response.startswith("json"):
-                clean_response = clean_response[4:]
-        report_data = json.loads(clean_response)
-        report = ReportData(**report_data)
-    except (json.JSONDecodeError, Exception):
+    if llm_response:
+        try:
+            clean_response = llm_response.strip()
+            if clean_response.startswith("```"):
+                clean_response = clean_response.split("```")[1]
+                if clean_response.startswith("json"):
+                    clean_response = clean_response[4:]
+            report_data = json.loads(clean_response)
+            report = ReportData(**report_data)
+        except (json.JSONDecodeError, Exception):
+            report = None
+    else:
+        report = None
+
+    if report is None:
         report = ReportData(
             summary="Interview completed. Review transcript for insights.",
             key_pains=["See transcript for details"],
             opportunities=["Further analysis recommended"]
         )
-    
+
     # Cache the report
     session["report"] = report.model_dump()
-    
+
     return ReportResponse(report=report)
 
 

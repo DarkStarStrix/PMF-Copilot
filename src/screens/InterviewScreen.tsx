@@ -81,9 +81,8 @@ export const InterviewScreen: React.FC = () => {
     navigate("/results");
   };
 
-  const handleToggleRecording = () => {
+  const handleToggleRecording = async () => {
     setIsRecording(!isRecording);
-    // In a real app, this would handle speech-to-text
   };
 
   if (!currentQuestion) {
